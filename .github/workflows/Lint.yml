@@ -112,9 +112,9 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --all-features -c .deny.toml
+          arguments: --all-features
           command: check
-          command-arguments: ${{ matrix.checks }}
+          command-arguments: ${{ matrix.checks }} -c .deny.toml
 
   lints:
     name: Lints
