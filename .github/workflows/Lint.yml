@@ -19,6 +19,7 @@ jobs:
   pre-commit:
     name: Run pre-commit checks
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'ready_for_review')) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -44,7 +45,7 @@ jobs:
   validate-pr-title:
     name: Validate squash commit message
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'ready_for_review') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -93,3 +94,16 @@ jobs:
           fi
           echo "Using committed binary: $COMMITTED_BIN"
           "$COMMITTED_BIN" --config .committed.toml --commit-file /tmp/commit-msg.txt
+
+  cargo-deny:
+    name: Check licenses with cargo-deny
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'ready_for_review')) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: check -c .deny.toml
