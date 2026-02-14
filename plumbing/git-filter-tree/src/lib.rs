@@ -74,7 +74,7 @@ fn filter_tree_recursive<'a>(
                 match filter_tree_recursive(repo, &subtree, &full_path, matcher) {
                     Ok(filtered_subtree) => {
                         // Only include the subtree if it has matching entries
-                        if filtered_subtree.len() > 0 {
+                        if !filtered_subtree.is_empty() {
                             builder.insert(name, filtered_subtree.id(), entry.filemode())?;
                         }
                     }

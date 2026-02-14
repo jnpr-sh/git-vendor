@@ -1,6 +1,6 @@
 use clap::CommandFactory;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(clap::Parser)]
 #[command(name = "xtask")]
@@ -35,7 +35,7 @@ fn main() {
     }
 }
 
-fn generate_man_pages(output_dir: &PathBuf) -> std::io::Result<()> {
+fn generate_man_pages(output_dir: &Path) -> std::io::Result<()> {
     let man1_dir = output_dir.join("man1");
     fs::create_dir_all(&man1_dir)?;
 
@@ -49,7 +49,7 @@ fn generate_man_pages(output_dir: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
-fn generate_git_filter_tree_man(output_dir: &PathBuf) -> std::io::Result<()> {
+fn generate_git_filter_tree_man(output_dir: &Path) -> std::io::Result<()> {
     let cmd = git_filter_tree::cli::Cli::command();
     let man = clap_mangen::Man::new(cmd);
     let mut buffer = Vec::new();
@@ -62,7 +62,7 @@ fn generate_git_filter_tree_man(output_dir: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
-fn generate_git_set_attr_man(output_dir: &PathBuf) -> std::io::Result<()> {
+fn generate_git_set_attr_man(output_dir: &Path) -> std::io::Result<()> {
     let cmd = git_set_attr::cli::Cli::command();
     let man = clap_mangen::Man::new(cmd);
     let mut buffer = Vec::new();
