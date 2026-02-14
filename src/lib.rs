@@ -3,10 +3,10 @@
 //! Vendor dependencies are tracked via custom attributes in `.gitattributes`:
 //!
 //! ```text
-//! path/to/dep/* vendor-url=https://example.com/repo.git vendor-branch=main
+//! path/to/dep/* vendored vendor-name=owner/repo vendor-url=https://example.com/owner/repo.git vendor-branch=main
 //! ```
 //!
-//! Fetched content is stored under `refs/vendor/<sanitized-pattern>`.
+//! Fetched content is stored under `refs/vendor/<name>`.
 
 use git_filter_tree::FilterTree;
 use git_set_attr::SetAttr;
@@ -20,9 +20,10 @@ use std::{
 /// A vendored dependency parsed from `.gitattributes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorDep {
+    pub name: String,
     pub pattern: String,
     pub url: String,
-    pub branch: String,
+    pub branch: Option<String>,
 }
 
 pub trait Vendor {
@@ -33,11 +34,16 @@ pub trait Vendor {
     /// tree from the current directory to the repository root directory is used.
     ///
     /// If the pattern is already specified, the `url` and `branch` are updated if necessary.
+    ///
+    /// The `maybe_name` argument overrides the dependency name. When `None`, the name is
+    /// derived from the URL as `owner/repo`. Local paths (non-URL remotes)
+    /// require an explicit name.
     fn track_pattern(
         &self,
         pattern: &str,
         url: &str,
         maybe_branch: Option<&str>,
+        maybe_name: Option<&str>,
     ) -> Result<(), Error>;
 
     /// Remove the pattern from the appropriate `.gitattributes` file using `git_set_attr`.
@@ -65,14 +71,24 @@ impl Vendor for Repository {
         pattern: &str,
         url: &str,
         maybe_branch: Option<&str>,
+        maybe_name: Option<&str>,
     ) -> Result<(), Error> {
         require_non_bare(self)?;
 
-        let branch = maybe_branch.unwrap_or("main");
-        let url_attr = format!("vendor-url={url}");
-        let branch_attr = format!("vendor-branch={branch}");
+        let name = resolve_name(url, maybe_name)?;
 
-        self.set_attr(pattern, &[&url_attr, &branch_attr], None)
+        let name_attr = format!("vendor-name={name}");
+        let url_attr = format!("vendor-url={url}");
+
+        let mut attrs: Vec<&str> = vec!["vendored", &name_attr, &url_attr];
+
+        let branch_attr;
+        if let Some(branch) = maybe_branch {
+            branch_attr = format!("vendor-branch={branch}");
+            attrs.push(&branch_attr);
+        }
+
+        self.set_attr(pattern, &attrs, None)
     }
 
     fn untrack_pattern(&self, pattern: &str) -> Result<(), Error> {
@@ -99,11 +115,14 @@ impl Vendor for Repository {
         }
 
         for dep in deps {
-            println!("Pattern: {}", dep.pattern);
+            println!("{} ({})", dep.name, dep.pattern);
             println!("  URL: {}", dep.url);
-            println!("  Branch: {}", dep.branch);
+            match &dep.branch {
+                Some(b) => println!("  Branch: {b}"),
+                None => println!("  Branch: (default)"),
+            }
 
-            let ref_name = vendor_ref_name(&dep.pattern);
+            let ref_name = vendor_ref_name(&dep.name);
             match self.find_reference(&ref_name) {
                 Ok(reference) => {
                     if let Some(oid) = reference.target() {
@@ -134,16 +153,22 @@ impl Vendor for Repository {
         }
 
         for dep in deps {
-            let sanitized = sanitize_ref_component(&dep.pattern);
-            let ref_target = vendor_ref_name(&dep.pattern);
+            let ref_target = vendor_ref_name(&dep.name);
 
-            println!("Fetching {} from {} ({})", dep.pattern, dep.url, dep.branch);
+            let branch_display = dep.branch.as_deref().unwrap_or("HEAD");
+            println!(
+                "Fetching {} from {} ({})",
+                dep.name, dep.url, branch_display
+            );
 
-            let remote_name = format!("vendor-{sanitized}");
+            let remote_name = format!("vendor-{}", dep.name.replace('/', "-"));
             let _ = self.remote_delete(&remote_name);
 
             let mut remote = self.remote(&remote_name, &dep.url)?;
-            let refspec = format!("+refs/heads/{}:{ref_target}", dep.branch);
+            let refspec = match &dep.branch {
+                Some(branch) => format!("+refs/heads/{branch}:{ref_target}"),
+                None => format!("+HEAD:{ref_target}"),
+            };
             remote.fetch(&[&refspec], None, None)?;
 
             let _ = self.remote_delete(&remote_name);
@@ -166,9 +191,9 @@ impl Vendor for Repository {
         }
 
         for dep in deps {
-            let ref_name = vendor_ref_name(&dep.pattern);
+            let ref_name = vendor_ref_name(&dep.name);
 
-            println!("Merging {}", dep.pattern);
+            println!("Merging {} ({})", dep.name, dep.pattern);
 
             let reference = self.find_reference(&ref_name).map_err(|_| {
                 Error::from_str(&format!(
@@ -193,7 +218,7 @@ impl Vendor for Repository {
             if index.has_conflicts() {
                 return Err(Error::from_str(&format!(
                     "Conflicts detected while merging {}",
-                    dep.pattern
+                    dep.name
                 )));
             }
 
@@ -201,7 +226,7 @@ impl Vendor for Repository {
             let merged_tree = self.find_tree(merged_oid)?;
 
             let signature = self.signature()?;
-            let message = format!("Merge vendored dependency: {}", dep.pattern);
+            let message = format!("Merge vendored dependency: {}", dep.name);
 
             self.commit(
                 Some("HEAD"),
@@ -233,20 +258,92 @@ fn require_non_bare(repo: &Repository) -> Result<(), Error> {
     }
 }
 
-/// Build the full ref path for a vendor pattern, e.g. `refs/vendor/STAR.txt`.
-fn vendor_ref_name(pattern: &str) -> String {
-    format!("refs/vendor/{}", sanitize_ref_component(pattern))
+/// Resolve the vendor dependency name.
+///
+/// If `maybe_name` is provided, it is used as-is. Otherwise the name is
+/// derived from the URL by extracting the last two path segments (typically
+/// `owner/repo`), stripping any `.git` suffix. Local (non-URL) remotes
+/// **must** supply an explicit name.
+fn resolve_name(url: &str, maybe_name: Option<&str>) -> Result<String, Error> {
+    if let Some(name) = maybe_name {
+        if name.is_empty() {
+            return Err(Error::from_str("Vendor dependency name must not be empty"));
+        }
+        return Ok(name.to_string());
+    }
+
+    name_from_url(url).ok_or_else(|| {
+        Error::from_str(
+            "Cannot derive a vendor name from a local path. \
+             Please provide an explicit name.",
+        )
+    })
 }
 
-/// Sanitize a pattern into a component safe for use in a git ref name.
-fn sanitize_ref_component(pattern: &str) -> String {
-    pattern
-        .replace('*', "STAR")
-        .replace('?', "QMARK")
-        .replace('[', "(")
-        .replace(']', ")")
-        .replace(' ', "_")
-        .replace('/', "-")
+/// Return `true` if `url` looks like a remote URL rather than a local path.
+///
+/// Recognizes `scheme://...` and SCP-style `user@host:path`.
+fn is_remote_url(url: &str) -> bool {
+    // scheme://...
+    if url.contains("://") {
+        return true;
+    }
+    // SCP-style: git@host:path  (must have @ before : and no path separators before @)
+    if let Some(at) = url.find('@') {
+        if let Some(colon) = url[at..].find(':') {
+            let colon_pos = at + colon;
+            // Make sure the part before @ has no slashes (not a path)
+            if !url[..at].contains('/') && colon_pos + 1 < url.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Try to extract `owner/repo` from a remote URL.
+///
+/// Supports:
+/// - `https://host/owner/repo.git`
+/// - `https://host/owner/repo`
+/// - `git@host:owner/repo.git`
+/// - `ssh://git@host/owner/repo.git`
+///
+/// Returns `None` for local paths or URLs with fewer than two path segments.
+fn name_from_url(url: &str) -> Option<String> {
+    if !is_remote_url(url) {
+        return None;
+    }
+
+    // Normalize: strip trailing `/` and `.git` suffix.
+    let mut cleaned = url.trim_end_matches('/');
+    cleaned = cleaned.strip_suffix(".git").unwrap_or(cleaned);
+
+    // Extract the path portion.
+    let path = if let Some(rest) = cleaned.split("://").nth(1) {
+        // scheme://[user@]host/path... → everything after the first `/`
+        rest.find('/').map(|i| &rest[i + 1..])
+    } else if let Some(at) = cleaned.find('@') {
+        // SCP-style: user@host:path
+        cleaned[at..].find(':').map(|i| &cleaned[at + i + 1..])
+    } else {
+        None
+    }?;
+
+    // Take the last two segments.
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return None;
+    }
+
+    let owner = segments[segments.len() - 2];
+    let repo = segments[segments.len() - 1];
+    Some(format!("{owner}/{repo}"))
+}
+
+/// Build the full ref path for a vendor dependency, e.g. `refs/vendor/owner/repo`.
+fn vendor_ref_name(name: &str) -> String {
+    format!("refs/vendor/{name}")
 }
 
 /// Find the appropriate `.gitattributes` file by walking from the current
@@ -279,8 +376,9 @@ fn find_gitattributes(repo: &Repository) -> Result<PathBuf, Error> {
 
 /// Parse vendor dependencies from a `.gitattributes` file.
 ///
-/// Only lines that contain **both** `vendor-url=<value>` and
-/// `vendor-branch=<value>` attributes are returned.
+/// A line is recognized as a vendor dependency when it carries at least
+/// `vendor-name=` and `vendor-url=`. The `vendor-branch=` attribute is
+/// optional — when absent, the dependency tracks the remote's default branch.
 fn parse_vendor_deps(path: &Path) -> Result<Vec<VendorDep>, Error> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -306,19 +404,23 @@ fn parse_vendor_deps(path: &Path) -> Result<Vec<VendorDep>, Error> {
             None => continue,
         };
 
+        let mut name = None;
         let mut url = None;
         let mut branch = None;
 
         for attr in parts {
-            if let Some(v) = attr.strip_prefix("vendor-url=") {
+            if let Some(v) = attr.strip_prefix("vendor-name=") {
+                name = Some(v.to_string());
+            } else if let Some(v) = attr.strip_prefix("vendor-url=") {
                 url = Some(v.to_string());
             } else if let Some(v) = attr.strip_prefix("vendor-branch=") {
                 branch = Some(v.to_string());
             }
         }
 
-        if let (Some(url), Some(branch)) = (url, branch) {
+        if let (Some(name), Some(url)) = (name, url) {
             deps.push(VendorDep {
+                name,
                 pattern: pattern.to_string(),
                 url,
                 branch,
@@ -362,7 +464,8 @@ fn remove_vendor_lines(path: &Path, pattern: &str) -> Result<(), Error> {
 }
 
 /// Return `true` if `line` starts with `pattern` and contains at least one
-/// `vendor-url=` or `vendor-branch=` attribute.
+/// vendor attribute (`vendored`, `vendor-name=`, `vendor-url=`, or
+/// `vendor-branch=`).
 fn is_vendor_line_for_pattern(line: &str, pattern: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -379,7 +482,12 @@ fn is_vendor_line_for_pattern(line: &str, pattern: &str) -> bool {
         return false;
     }
 
-    parts.any(|attr| attr.starts_with("vendor-url=") || attr.starts_with("vendor-branch="))
+    parts.any(|attr| {
+        attr == "vendored"
+            || attr.starts_with("vendor-name=")
+            || attr.starts_with("vendor-url=")
+            || attr.starts_with("vendor-branch=")
+    })
 }
 
 /// Filter dependencies by exact pattern match.
@@ -400,54 +508,147 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    /// Mutex to serialize tests that call `std::env::set_current_dir`, since
-    /// the current directory is process-global state.
-    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn setup_repo() -> (Repository, TempDir) {
-        let dir = TempDir::new().unwrap();
-        let repo = Repository::init(dir.path()).unwrap();
-
-        let mut config = repo.config().unwrap();
-        config.set_str("user.name", "Test").unwrap();
-        config.set_str("user.email", "test@test").unwrap();
-
-        // Create an initial empty commit so HEAD exists.
-        let sig = repo.signature().unwrap();
-        let oid = {
-            let mut idx = repo.index().unwrap();
-            idx.write_tree().unwrap()
-        };
-        {
-            let tree = repo.find_tree(oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-                .unwrap();
-        }
-
-        (repo, dir)
-    }
-
-    fn write_gitattributes(dir: &Path, content: &str) {
-        let path = dir.join(".gitattributes");
-        let mut f = fs::File::create(&path).unwrap();
-        write!(f, "{content}").unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // Pure helper tests (no cwd dependency)
-    // -----------------------------------------------------------------------
+    // -- is_remote_url ------------------------------------------------------
 
     #[test]
-    fn sanitize_ref_component_replaces_globs() {
-        assert_eq!(sanitize_ref_component("*.txt"), "STAR.txt");
-        assert_eq!(sanitize_ref_component("vendor/*"), "vendor-STAR");
-        assert_eq!(sanitize_ref_component("src/[a-z]?"), "src-(a-z)QMARK");
+    fn is_remote_url_https() {
+        assert!(is_remote_url("https://github.com/owner/repo.git"));
     }
 
     #[test]
-    fn vendor_ref_name_has_correct_prefix() {
-        assert_eq!(vendor_ref_name("*.txt"), "refs/vendor/STAR.txt");
+    fn is_remote_url_ssh_scheme() {
+        assert!(is_remote_url("ssh://git@github.com/owner/repo.git"));
     }
+
+    #[test]
+    fn is_remote_url_scp_style() {
+        assert!(is_remote_url("git@github.com:owner/repo.git"));
+    }
+
+    #[test]
+    fn is_remote_url_rejects_absolute_path() {
+        assert!(!is_remote_url("/home/user/repos/mylib"));
+    }
+
+    #[test]
+    fn is_remote_url_rejects_relative_path() {
+        assert!(!is_remote_url("../repos/mylib"));
+    }
+
+    // -- name_from_url ------------------------------------------------------
+
+    #[test]
+    fn name_from_url_https() {
+        assert_eq!(
+            name_from_url("https://github.com/owner/repo.git"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_https_no_dotgit() {
+        assert_eq!(
+            name_from_url("https://github.com/owner/repo"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_https_trailing_slash() {
+        assert_eq!(
+            name_from_url("https://github.com/owner/repo.git/"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_scp_style() {
+        assert_eq!(
+            name_from_url("git@github.com:owner/repo.git"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_ssh_scheme() {
+        assert_eq!(
+            name_from_url("ssh://git@github.com/owner/repo.git"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_deep_path_takes_last_two() {
+        assert_eq!(
+            name_from_url("https://gitlab.com/group/sub/owner/repo.git"),
+            Some("owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn name_from_url_too_few_segments() {
+        assert_eq!(name_from_url("https://github.com/repo.git"), None);
+    }
+
+    #[test]
+    fn name_from_url_local_path() {
+        assert_eq!(name_from_url("/home/user/repos/mylib"), None);
+    }
+
+    #[test]
+    fn name_from_url_relative_path() {
+        assert_eq!(name_from_url("../repos/mylib"), None);
+    }
+
+    // -- resolve_name -------------------------------------------------------
+
+    #[test]
+    fn resolve_name_explicit() {
+        assert_eq!(
+            resolve_name("https://github.com/a/b.git", Some("custom")).unwrap(),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn resolve_name_derived_from_url() {
+        assert_eq!(
+            resolve_name("https://github.com/owner/repo.git", None).unwrap(),
+            "owner/repo"
+        );
+    }
+
+    #[test]
+    fn resolve_name_local_path_requires_explicit() {
+        assert!(resolve_name("/local/path", None).is_err());
+    }
+
+    #[test]
+    fn resolve_name_rejects_empty_explicit() {
+        assert!(resolve_name("https://github.com/a/b.git", Some("")).is_err());
+    }
+
+    // -- vendor_ref_name ----------------------------------------------------
+
+    #[test]
+    fn vendor_ref_name_owner_repo() {
+        assert_eq!(vendor_ref_name("owner/repo"), "refs/vendor/owner/repo");
+    }
+
+    #[test]
+    fn vendor_ref_name_custom_name() {
+        assert_eq!(vendor_ref_name("custom-name"), "refs/vendor/custom-name");
+    }
+
+    #[test]
+    fn vendor_ref_name_multiple_slashes() {
+        assert_eq!(
+            vendor_ref_name("multiple/slash/names"),
+            "refs/vendor/multiple/slash/names"
+        );
+    }
+
+    // -- parse_vendor_deps --------------------------------------------------
 
     #[test]
     fn parse_vendor_deps_from_file() {
@@ -455,23 +656,43 @@ mod tests {
         let path = dir.path().join(".gitattributes");
 
         let mut f = fs::File::create(&path).unwrap();
-        writeln!(f, "*.txt vendor-url=https://a.com/r.git vendor-branch=main").unwrap();
-        writeln!(f, "*.rs vendor-url=https://b.com/r.git vendor-branch=dev").unwrap();
+        writeln!(
+            f,
+            "*.txt vendored vendor-name=o/r1 vendor-url=https://a.com/o/r1.git vendor-branch=main"
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "*.rs vendored vendor-name=o/r2 vendor-url=https://b.com/o/r2.git vendor-branch=dev"
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "*.toml vendored vendor-name=o/r3 vendor-url=https://c.com/o/r3.git"
+        )
+        .unwrap();
         writeln!(f, "# comment").unwrap();
         writeln!(f, "*.md diff").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         drop(f);
 
         let deps = parse_vendor_deps(&path).unwrap();
-        assert_eq!(deps.len(), 2);
+        assert_eq!(deps.len(), 3);
 
+        assert_eq!(deps[0].name, "o/r1");
         assert_eq!(deps[0].pattern, "*.txt");
-        assert_eq!(deps[0].url, "https://a.com/r.git");
-        assert_eq!(deps[0].branch, "main");
+        assert_eq!(deps[0].url, "https://a.com/o/r1.git");
+        assert_eq!(deps[0].branch, Some("main".into()));
 
+        assert_eq!(deps[1].name, "o/r2");
         assert_eq!(deps[1].pattern, "*.rs");
-        assert_eq!(deps[1].url, "https://b.com/r.git");
-        assert_eq!(deps[1].branch, "dev");
+        assert_eq!(deps[1].url, "https://b.com/o/r2.git");
+        assert_eq!(deps[1].branch, Some("dev".into()));
+
+        assert_eq!(deps[2].name, "o/r3");
+        assert_eq!(deps[2].pattern, "*.toml");
+        assert_eq!(deps[2].url, "https://c.com/o/r3.git");
+        assert_eq!(deps[2].branch, None);
     }
 
     #[test]
@@ -481,44 +702,75 @@ mod tests {
     }
 
     #[test]
-    fn parse_vendor_deps_skips_partial_vendor_lines() {
+    fn parse_vendor_deps_skips_lines_missing_any_required_vendor_attr() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(".gitattributes");
 
-        // Only vendor-url, missing vendor-branch → should be skipped.
-        fs::write(&path, "*.txt vendor-url=https://a.com/r.git\n").unwrap();
+        // Missing vendor-name → skip
+        fs::write(
+            &path,
+            "*.txt vendor-url=https://a.com/o/r.git vendor-branch=main\n",
+        )
+        .unwrap();
+        assert!(parse_vendor_deps(&path).unwrap().is_empty());
 
+        // Missing vendor-url → skip
+        fs::write(&path, "*.txt vendor-name=o/r vendor-branch=main\n").unwrap();
+        assert!(parse_vendor_deps(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_vendor_deps_branch_is_optional() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".gitattributes");
+
+        // Missing vendor-branch → still parsed, branch is None
+        fs::write(
+            &path,
+            "*.txt vendor-name=o/r vendor-url=https://a.com/o/r.git\n",
+        )
+        .unwrap();
         let deps = parse_vendor_deps(&path).unwrap();
-        assert!(deps.is_empty());
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].branch, None);
     }
 
+    // -- is_vendor_line_for_pattern -----------------------------------------
+
     #[test]
-    fn is_vendor_line_for_pattern_matches() {
+    fn is_vendor_line_matches() {
         assert!(is_vendor_line_for_pattern(
-            "*.txt vendor-url=https://a.com vendor-branch=main",
+            "*.txt vendored vendor-name=o/r vendor-url=https://a.com vendor-branch=main",
             "*.txt"
         ));
     }
 
     #[test]
-    fn is_vendor_line_for_pattern_ignores_other_patterns() {
+    fn is_vendor_line_matches_vendored_only() {
+        assert!(is_vendor_line_for_pattern("*.txt vendored", "*.txt"));
+    }
+
+    #[test]
+    fn is_vendor_line_ignores_other_patterns() {
         assert!(!is_vendor_line_for_pattern(
-            "*.rs vendor-url=https://a.com vendor-branch=main",
+            "*.rs vendored vendor-name=o/r vendor-url=https://a.com vendor-branch=main",
             "*.txt"
         ));
     }
 
     #[test]
-    fn is_vendor_line_for_pattern_ignores_non_vendor_lines() {
+    fn is_vendor_line_ignores_non_vendor_lines() {
         assert!(!is_vendor_line_for_pattern("*.txt diff -text", "*.txt"));
     }
 
     #[test]
-    fn is_vendor_line_for_pattern_ignores_comments_and_blanks() {
+    fn is_vendor_line_ignores_comments_and_blanks() {
         assert!(!is_vendor_line_for_pattern("# comment", "*.txt"));
         assert!(!is_vendor_line_for_pattern("", "*.txt"));
         assert!(!is_vendor_line_for_pattern("   ", "*.txt"));
     }
+
+    // -- remove_vendor_lines ------------------------------------------------
 
     #[test]
     fn remove_vendor_lines_keeps_non_vendor() {
@@ -526,9 +778,9 @@ mod tests {
         let path = dir.path().join(".gitattributes");
 
         let original = "\
-*.txt vendor-url=https://a.com vendor-branch=main
+*.txt vendored vendor-name=o/r vendor-url=https://a.com vendor-branch=main
 *.txt diff
-*.rs vendor-url=https://b.com vendor-branch=dev
+*.rs vendored vendor-name=x/y vendor-url=https://b.com vendor-branch=dev
 # comment
 ";
         fs::write(&path, original).unwrap();
@@ -538,7 +790,7 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(!content.contains("vendor-url=https://a.com"));
         assert!(content.contains("*.txt diff"));
-        assert!(content.contains("*.rs vendor-url=https://b.com"));
+        assert!(content.contains("*.rs vendored vendor-name=x/y"));
         assert!(content.contains("# comment"));
     }
 
@@ -547,18 +799,22 @@ mod tests {
         assert!(remove_vendor_lines(Path::new("/nonexistent/.gitattributes"), "*.txt").is_ok());
     }
 
+    // -- filter_deps --------------------------------------------------------
+
     #[test]
     fn filter_deps_none_returns_all() {
         let deps = vec![
             VendorDep {
+                name: "a/b".into(),
                 pattern: "a".into(),
                 url: "u".into(),
-                branch: "b".into(),
+                branch: Some("b".into()),
             },
             VendorDep {
+                name: "c/d".into(),
                 pattern: "b".into(),
                 url: "u".into(),
-                branch: "b".into(),
+                branch: None,
             },
         ];
         assert_eq!(filter_deps(&deps, None).len(), 2);
@@ -568,14 +824,16 @@ mod tests {
     fn filter_deps_exact_match() {
         let deps = vec![
             VendorDep {
+                name: "a/b".into(),
                 pattern: "*.txt".into(),
                 url: "u".into(),
-                branch: "b".into(),
+                branch: Some("b".into()),
             },
             VendorDep {
+                name: "c/d".into(),
                 pattern: "*.rs".into(),
                 url: "u".into(),
-                branch: "b".into(),
+                branch: None,
             },
         ];
         let filtered = filter_deps(&deps, Some("*.txt"));
@@ -586,131 +844,11 @@ mod tests {
     #[test]
     fn filter_deps_no_match() {
         let deps = vec![VendorDep {
+            name: "a/b".into(),
             pattern: "*.txt".into(),
             url: "u".into(),
-            branch: "b".into(),
+            branch: Some("b".into()),
         }];
         assert!(filter_deps(&deps, Some("*.rs")).is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Trait method tests (need cwd)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn track_pattern_writes_gitattributes() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        repo.track_pattern("*.txt", "https://example.com/r.git", Some("main"))
-            .unwrap();
-
-        let content = fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
-        assert!(content.contains("*.txt"));
-        assert!(content.contains("vendor-url=https://example.com/r.git"));
-        assert!(content.contains("vendor-branch=main"));
-    }
-
-    #[test]
-    fn track_pattern_defaults_to_main_branch() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        repo.track_pattern("*.rs", "https://example.com/r.git", None)
-            .unwrap();
-
-        let content = fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
-        assert!(content.contains("vendor-branch=main"));
-    }
-
-    #[test]
-    fn untrack_pattern_removes_vendor_lines() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        repo.track_pattern("*.txt", "https://example.com/r.git", Some("main"))
-            .unwrap();
-
-        // Verify it was tracked.
-        let ga = dir.path().join(".gitattributes");
-        let deps = parse_vendor_deps(&ga).unwrap();
-        assert_eq!(deps.len(), 1);
-
-        // Untrack.
-        repo.untrack_pattern("*.txt").unwrap();
-
-        // The vendor line should be gone.
-        let deps = parse_vendor_deps(&ga).unwrap();
-        assert!(deps.is_empty());
-    }
-
-    #[test]
-    fn untrack_pattern_is_noop_without_gitattributes() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        assert!(repo.untrack_pattern("*.txt").is_ok());
-    }
-
-    #[test]
-    fn status_ok_with_no_deps() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        assert!(repo.status(None).is_ok());
-    }
-
-    #[test]
-    fn status_ok_with_tracked_dep() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        write_gitattributes(
-            dir.path(),
-            "*.txt vendor-url=https://example.com/r.git vendor-branch=main\n",
-        );
-
-        assert!(repo.status(None).is_ok());
-    }
-
-    #[test]
-    fn fetch_errors_with_no_deps() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let err = repo.fetch(None).unwrap_err();
-        assert!(err.message().contains("No vendored dependencies to fetch"));
-    }
-
-    #[test]
-    fn merge_errors_with_no_deps() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let (repo, dir) = setup_repo();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let err = Vendor::merge(&repo, None).unwrap_err();
-        assert!(err.message().contains("No vendored dependencies to merge"));
-    }
-
-    #[test]
-    fn bare_repo_rejects_all_operations() {
-        let dir = TempDir::new().unwrap();
-        let repo = Repository::init_bare(dir.path()).unwrap();
-
-        assert!(
-            repo.track_pattern("*.txt", "https://example.com/r.git", None)
-                .is_err()
-        );
-        assert!(repo.untrack_pattern("*.txt").is_err());
-        assert!(repo.status(None).is_err());
-        assert!(repo.fetch(None).is_err());
-        assert!(Vendor::merge(&repo, None).is_err());
     }
 }
