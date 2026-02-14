@@ -1,24 +1,10 @@
+mod cli;
+
 use clap::Parser;
+use cli::Cli;
 use git_set_attr::SetAttr;
 use git2 as git;
-use std::path::PathBuf;
 use std::process;
-
-#[derive(Parser)]
-#[command(name = "git-set-attr")]
-#[command(author, version, about = "Set gitattributes via patterns and key-value pairs", long_about = None)]
-struct Cli {
-    /// Gitattributes-style pattern (e.g. "*.txt", "path/to/*.bin")
-    pattern: String,
-
-    /// Attributes to set (e.g. "diff", "-text", "filter=lfs")
-    #[arg(required = true)]
-    attributes: Vec<String>,
-
-    /// Path to the .gitattributes file to modify
-    #[arg(short, long)]
-    file: Option<PathBuf>,
-}
 
 fn main() {
     if let Err(e) = run() {
