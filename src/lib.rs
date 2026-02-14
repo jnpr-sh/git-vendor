@@ -54,15 +54,18 @@ pub trait Vendor {
     fn untrack_pattern(&self, pattern: &str) -> Result<(), Error>;
 
     /// Return the status of all vendored content, or any errors encountered along the way.
-    fn status(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
+    fn vendor_status(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
 
     /// Fetch the latest content from all relevant vendor sources.
     ///
     /// All vendor refs are stored under `/refs/vendor/`.
-    fn fetch(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
+    fn vendor_fetch(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
 
     /// Merge the latest content from all relevant vendor sources.
-    fn merge(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
+    fn vendor_merge(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
+
+    /// Fetch and then merge the latest content from all relevant vendor sources.
+    fn vendor_pull(&self, maybe_pattern: Option<&str>) -> Result<(), Error>;
 }
 
 impl Vendor for Repository {
@@ -102,7 +105,7 @@ impl Vendor for Repository {
         remove_vendor_lines(&path, pattern)
     }
 
-    fn status(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
+    fn vendor_status(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
         require_non_bare(self)?;
 
         let path = find_gitattributes(self)?;
@@ -141,7 +144,7 @@ impl Vendor for Repository {
         Ok(())
     }
 
-    fn fetch(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
+    fn vendor_fetch(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
         require_non_bare(self)?;
 
         let path = find_gitattributes(self)?;
@@ -179,7 +182,7 @@ impl Vendor for Repository {
         Ok(())
     }
 
-    fn merge(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
+    fn vendor_merge(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
         require_non_bare(self)?;
 
         let path = find_gitattributes(self)?;
@@ -241,6 +244,11 @@ impl Vendor for Repository {
         }
 
         Ok(())
+    }
+
+    fn vendor_pull(&self, maybe_pattern: Option<&str>) -> Result<(), Error> {
+        self.vendor_fetch(maybe_pattern)?;
+        self.vendor_merge(maybe_pattern)
     }
 }
 

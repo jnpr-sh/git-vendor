@@ -180,7 +180,7 @@ fn status_ok_with_no_deps() {
     let (repo, dir) = setup_repo();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    assert!(repo.status(None).is_ok());
+    assert!(repo.vendor_status(None).is_ok());
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn status_ok_with_tracked_dep() {
         "*.txt vendored vendor-name=o/r vendor-url=https://example.com/o/r.git vendor-branch=main\n",
     );
 
-    assert!(repo.status(None).is_ok());
+    assert!(repo.vendor_status(None).is_ok());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn status_ok_with_tracked_dep_no_branch() {
         "*.txt vendored vendor-name=o/r vendor-url=https://example.com/o/r.git\n",
     );
 
-    assert!(repo.status(None).is_ok());
+    assert!(repo.vendor_status(None).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ fn fetch_errors_with_no_deps() {
     let (repo, dir) = setup_repo();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let err = repo.fetch(None).unwrap_err();
+    let err = repo.vendor_fetch(None).unwrap_err();
     assert!(err.message().contains("No vendored dependencies to fetch"));
 }
 
@@ -235,7 +235,7 @@ fn merge_errors_with_no_deps() {
     let (repo, dir) = setup_repo();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let err = Vendor::merge(&repo, None).unwrap_err();
+    let err = Vendor::vendor_merge(&repo, None).unwrap_err();
     assert!(err.message().contains("No vendored dependencies to merge"));
 }
 
@@ -253,7 +253,7 @@ fn bare_repo_rejects_all_operations() {
             .is_err()
     );
     assert!(repo.untrack_pattern("*.txt").is_err());
-    assert!(repo.status(None).is_err());
-    assert!(repo.fetch(None).is_err());
-    assert!(Vendor::merge(&repo, None).is_err());
+    assert!(repo.vendor_status(None).is_err());
+    assert!(repo.vendor_fetch(None).is_err());
+    assert!(Vendor::vendor_merge(&repo, None).is_err());
 }
