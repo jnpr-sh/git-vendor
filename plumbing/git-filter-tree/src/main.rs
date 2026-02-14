@@ -1,33 +1,10 @@
+mod cli;
+
 use clap::Parser;
+use cli::{Cli, OutputFormat};
 use git_filter_tree::FilterTree;
 use git2 as git;
 use std::process;
-
-#[derive(Parser)]
-#[command(name = "git-filter-tree")]
-#[command(author, version, about = "Filter Git tree entries by gitattributes-style patterns", long_about = None)]
-struct Cli {
-    /// Tree-ish reference (commit, branch, tag, or tree SHA)
-    treeish: String,
-
-    /// Gitattributes-style patterns to filter tree entries
-    #[arg(required = true)]
-    patterns: Vec<String>,
-
-    /// Output format
-    #[arg(short, long, value_enum, default_value = "tree-sha")]
-    format: OutputFormat,
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum OutputFormat {
-    /// Output only the tree SHA
-    TreeSha,
-    /// Output tree entries (name and type)
-    Entries,
-    /// Output detailed tree information
-    Detailed,
-}
 
 fn main() {
     if let Err(e) = run() {
