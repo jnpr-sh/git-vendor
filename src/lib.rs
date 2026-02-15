@@ -201,7 +201,7 @@ impl Vendor for Repository {
                 Some(branch) => format!("+refs/heads/{branch}:{ref_target}"),
                 None => format!("+HEAD:{ref_target}"),
             };
-            remote.fetch(&[&refspec], fetch_opts.as_mut().map(|o| &mut **o), None)?;
+            remote.fetch(&[&refspec], fetch_opts.as_deref_mut(), None)?;
 
             println!("  Fetched to {ref_target}");
         }
@@ -394,15 +394,14 @@ fn is_remote_url(url: &str) -> bool {
         return true;
     }
     // SCP-style: git@host:path  (must have @ before : and no path separators before @)
-    if let Some(at) = url.find('@') {
-        if let Some(colon) = url[at..].find(':') {
+    if let Some(at) = url.find('@')
+        && let Some(colon) = url[at..].find(':') {
             let colon_pos = at + colon;
             // Make sure the part before @ has no slashes (not a path)
             if !url[..at].contains('/') && colon_pos + 1 < url.len() {
                 return true;
             }
         }
-    }
     false
 }
 
