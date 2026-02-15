@@ -11,7 +11,7 @@
 use git_filter_tree::FilterTree;
 use git_set_attr::SetAttr;
 use git2::build::CheckoutBuilder;
-use git2::{Error, FetchOptions, MergeOptions, Oid, Repository};
+use git2::{Error, FetchOptions, MergeOptions, Repository};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -217,6 +217,18 @@ impl Vendor for Repository {
     ) -> Result<(), Error> {
         require_non_bare(self)?;
 
+        // Require a clean index (no staged changes), just like `git merge`.
+        {
+            let head_tree = self.head()?.peel_to_tree()?;
+            let index_oid = self.index()?.write_tree()?;
+            if index_oid != head_tree.id() {
+                return Err(Error::from_str(
+                    "Your index contains uncommitted changes. \
+                     Please commit or stash them before merging.",
+                ));
+            }
+        }
+
         let path = find_gitattributes(self)?;
         let deps = parse_vendor_deps(&path)?;
         let deps = filter_deps(&deps, maybe_pattern);
@@ -270,16 +282,17 @@ impl Vendor for Repository {
             let head_commit = head.peel_to_commit()?;
             let head_tree = head_commit.tree()?;
 
-            // Use an empty tree as the merge base so that files present in
-            // HEAD but absent from the filtered vendor tree are treated as
-            // "added by ours" rather than "deleted by theirs".  This
-            // preserves all existing host files while still layering in the
-            // vendor content.
-            let empty_tree_oid = git2::Index::new()?.write_tree_to(self)?;
-            let empty_tree = self.find_tree(empty_tree_oid)?;
+            // The ancestor must be the previous vendor content in HEAD, not
+            // the full HEAD tree.  Using head_tree as ancestor would cause
+            // the three-way merge to treat every non-vendor file as a
+            // deletion by "theirs" (the filtered vendor tree), wiping out
+            // the entire working tree.  Filtering head_tree by the full
+            // pattern produces the correct base: non-vendor files appear
+            // only in "ours" and are preserved as our-side additions.
+            let ancestor_tree = self.filter_by_patterns(&head_tree, &[&dep.pattern])?;
 
             let mut index =
-                self.merge_trees(&empty_tree, &head_tree, &filtered_tree, merge_opts)?;
+                self.merge_trees(&ancestor_tree, &head_tree, &filtered_tree, merge_opts)?;
 
             let default_message = format!("Merge vendored dependency: {}", dep.name);
             let message = opts.message.as_deref().unwrap_or(&default_message);
@@ -304,9 +317,6 @@ impl Vendor for Repository {
                 co.allow_conflicts(true).conflict_style_merge(true);
                 self.checkout_index(Some(&mut repo_index), Some(&mut co))?;
 
-                if !opts.squash {
-                    set_merge_head(self, vendor_oid)?;
-                }
                 set_merge_msg(self, message)?;
 
                 return Err(Error::from_str(&format!(
@@ -329,9 +339,6 @@ impl Vendor for Repository {
             self.checkout_tree(merged_tree.as_object(), Some(&mut co))?;
 
             if skip_commit {
-                if !opts.squash {
-                    set_merge_head(self, vendor_oid)?;
-                }
                 set_merge_msg(self, message)?;
                 println!("  Merged (not committed)");
             } else {
@@ -342,7 +349,7 @@ impl Vendor for Repository {
                     &signature,
                     message,
                     &merged_tree,
-                    &[&head_commit, &vendor_commit],
+                    &[&head_commit],
                 )?;
                 println!("  Merged successfully");
             }
@@ -359,12 +366,6 @@ impl Vendor for Repository {
 // ---------------------------------------------------------------------------
 // Merge state helpers
 // ---------------------------------------------------------------------------
-
-/// Write `MERGE_HEAD` so that a subsequent `git commit` creates a merge commit.
-fn set_merge_head(repo: &Repository, oid: Oid) -> Result<(), Error> {
-    let path = repo.path().join("MERGE_HEAD");
-    fs::write(&path, format!("{oid}\n")).map_err(|e| Error::from_str(&e.to_string()))
-}
 
 /// Write `MERGE_MSG` so that `git commit` picks up the message.
 fn set_merge_msg(repo: &Repository, msg: &str) -> Result<(), Error> {
@@ -642,6 +643,7 @@ fn filter_deps<'a>(deps: &'a [VendorDep], filter: Option<&str>) -> Vec<&'a Vendo
 mod tests {
     use super::*;
     use std::io::Write;
+
     use tempfile::TempDir;
 
     // -- is_remote_url ------------------------------------------------------

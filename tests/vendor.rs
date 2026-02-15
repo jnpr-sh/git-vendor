@@ -1,7 +1,7 @@
 //! Integration tests for the `Vendor` trait methods on `Repository`.
 
 use git_vendor::{Vendor, VendorMergeOpts};
-use git2::Repository;
+use git2::{Oid, Repository};
 use std::{fs, io::Write, path::Path, sync::Mutex};
 use tempfile::TempDir;
 
@@ -68,28 +68,25 @@ fn setup_upstream(files: &[(&str, &[u8])]) -> (Repository, TempDir) {
     (repo, dir)
 }
 
-fn commit_all(repo: &Repository, message: &str) {
-    let sig = repo.signature().unwrap();
+fn write_gitattributes(dir: &Path, content: &str) {
+    let path = dir.join(".gitattributes");
+    let mut f = fs::File::create(&path).unwrap();
+    write!(f, "{content}").unwrap();
+}
+
+/// Stage everything in the working tree and commit with the given message.
+fn commit_all(repo: &Repository, message: &str) -> Oid {
     let mut index = repo.index().unwrap();
     index
         .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
         .unwrap();
     index.write().unwrap();
-    let oid = index.write_tree().unwrap();
-    let tree = repo.find_tree(oid).unwrap();
-
-    let head = repo.head().ok();
-    let parent_commit = head.as_ref().and_then(|h| h.peel_to_commit().ok());
-    let parents: Vec<&git2::Commit> = parent_commit.as_ref().into_iter().collect();
-
-    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-        .unwrap();
-}
-
-fn write_gitattributes(dir: &Path, content: &str) {
-    let path = dir.join(".gitattributes");
-    let mut f = fs::File::create(&path).unwrap();
-    write!(f, "{content}").unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    let sig = repo.signature().unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------

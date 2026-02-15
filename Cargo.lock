@@ -227,6 +227,7 @@ dependencies = [
 name = "git-vendor"
 version = "0.0.3"
 dependencies = [
+ "clap",
  "git-filter-tree",
  "git-set-attr",
  "git2",
