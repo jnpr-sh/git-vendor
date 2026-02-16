@@ -29,7 +29,17 @@ impl FilterTree for git2::Repository {
         // Build GlobSet matcher
         let mut glob_builder = GlobSetBuilder::new();
         for pattern in patterns {
-            let glob = globset::Glob::new(pattern)
+            // A trailing `/` means "this directory" in gitattributes/gitignore
+            // semantics.  Normalize to `dir/**` so globset matches all files
+            // under the directory recursively.
+            let owned;
+            let pat = if pattern.ends_with('/') {
+                owned = format!("{}**", pattern);
+                owned.as_str()
+            } else {
+                pattern
+            };
+            let glob = globset::Glob::new(pat)
                 .map_err(|e| Error::from_str(&format!("Invalid pattern '{}': {}", pattern, e)))?;
             glob_builder.add(glob);
         }
@@ -347,6 +357,45 @@ mod tests {
         assert!(filtered.get_name("test2.rs").is_some());
         assert!(filtered.get_name("README.md").is_some());
         assert!(filtered.get_name("data.json").is_none());
+
+        cleanup_test_repo(temp_path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_trailing_slash_matches_directory_contents() -> Result<(), Error> {
+        let (repo, temp_path) = setup_test_repo();
+
+        // Build a tree with a subdirectory: pyo3/Cargo.toml, pyo3/src/lib.rs,
+        // and a top-level file that should NOT match.
+        let blob = repo.blob(b"content")?;
+
+        let mut src_builder = repo.treebuilder(None)?;
+        src_builder.insert("lib.rs", blob, 0o100644)?;
+        let src_oid = src_builder.write()?;
+
+        let mut pyo3_builder = repo.treebuilder(None)?;
+        pyo3_builder.insert("Cargo.toml", blob, 0o100644)?;
+        pyo3_builder.insert("src", src_oid, 0o040000)?;
+        let pyo3_oid = pyo3_builder.write()?;
+
+        let mut root_builder = repo.treebuilder(None)?;
+        root_builder.insert("pyo3", pyo3_oid, 0o040000)?;
+        root_builder.insert("README.md", blob, 0o100644)?;
+        let root_oid = root_builder.write()?;
+        let tree = repo.find_tree(root_oid)?;
+
+        // "pyo3/" (trailing slash) must match all files under pyo3/.
+        let filtered = repo.filter_by_patterns(&tree, &["pyo3/"])?;
+        assert_eq!(filtered.len(), 1, "only the pyo3 dir should remain");
+        assert!(filtered.get_name("pyo3").is_some());
+        assert!(filtered.get_name("README.md").is_none());
+
+        // The pyo3 subtree itself must retain both entries.
+        let pyo3_entry = filtered.get_name("pyo3").unwrap();
+        let pyo3_tree = repo.find_tree(pyo3_entry.id())?;
+        assert!(pyo3_tree.get_name("Cargo.toml").is_some());
+        assert!(pyo3_tree.get_name("src").is_some());
 
         cleanup_test_repo(temp_path);
         Ok(())
