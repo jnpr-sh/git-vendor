@@ -116,13 +116,13 @@ jobs:
           command: check
           command-arguments: ${{ matrix.checks }} -c .deny.toml
 
-  lints:
-    name: Lints
-    if: always()
+  lint:
+    name: Lint
+    if: ${{ always() && !github.event.pull_request.draft }}
     needs: [pre-commit, validate-pr-title, cargo-deny]
     runs-on: ubuntu-latest
     steps:
       - run: |
-          result="${{ (needs.pre-commit.result == 'skipped' || needs.cargo-deny.result == 'skipped' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'failure' || 'success' }}"
+          result="${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'failure' || 'success' }}"
           echo "result: $result"
           [[ "$result" == "success" ]] || exit 1
