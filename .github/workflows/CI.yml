@@ -132,7 +132,7 @@ jobs:
 
   ci:
     name: CI
-    if: always()
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) }}
     needs: [linux, musllinux, windows, macos, man]
     runs-on: ubuntu-latest
     steps:
