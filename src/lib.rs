@@ -225,6 +225,20 @@ impl Vendor for Repository {
             return Err(Error::from_str("No vendored dependencies to merge"));
         }
 
+        // Reject if there are staged but uncommitted changes — the merge
+        // would silently overwrite them.
+        {
+            let head_commit = self.head()?.peel_to_commit()?;
+            let head_tree = head_commit.tree()?;
+            let diff = self.diff_tree_to_index(Some(&head_tree), None, None)?;
+            if diff.deltas().count() > 0 {
+                return Err(Error::from_str(
+                    "uncommitted changes in the index; \
+                     please commit or stash before merging",
+                ));
+            }
+        }
+
         let skip_commit = opts.no_commit || opts.squash;
         if skip_commit && deps.len() > 1 {
             return Err(Error::from_str(
@@ -256,7 +270,16 @@ impl Vendor for Repository {
             let head_commit = head.peel_to_commit()?;
             let head_tree = head_commit.tree()?;
 
-            let mut index = self.merge_trees(&head_tree, &head_tree, &filtered_tree, merge_opts)?;
+            // Use an empty tree as the merge base so that files present in
+            // HEAD but absent from the filtered vendor tree are treated as
+            // "added by ours" rather than "deleted by theirs".  This
+            // preserves all existing host files while still layering in the
+            // vendor content.
+            let empty_tree_oid = git2::Index::new()?.write_tree_to(self)?;
+            let empty_tree = self.find_tree(empty_tree_oid)?;
+
+            let mut index =
+                self.merge_trees(&empty_tree, &head_tree, &filtered_tree, merge_opts)?;
 
             let default_message = format!("Merge vendored dependency: {}", dep.name);
             let message = opts.message.as_deref().unwrap_or(&default_message);
@@ -395,13 +418,14 @@ fn is_remote_url(url: &str) -> bool {
     }
     // SCP-style: git@host:path  (must have @ before : and no path separators before @)
     if let Some(at) = url.find('@')
-        && let Some(colon) = url[at..].find(':') {
-            let colon_pos = at + colon;
-            // Make sure the part before @ has no slashes (not a path)
-            if !url[..at].contains('/') && colon_pos + 1 < url.len() {
-                return true;
-            }
+        && let Some(colon) = url[at..].find(':')
+    {
+        let colon_pos = at + colon;
+        // Make sure the part before @ has no slashes (not a path)
+        if !url[..at].contains('/') && colon_pos + 1 < url.len() {
+            return true;
         }
+    }
     false
 }
 
